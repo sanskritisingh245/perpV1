@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 import { SignupSchema} from "./zod/auth";
 import { authMiddleware } from "./middleware";
 import { OrderSchema } from "./zod/order";
-import { excuteTrade, findMatchingOrders } from "./helperFunction/helper";
+import {  findMatchingOrders } from "./helperFunction/helper";
 
 const JWT_SECRET=process.env.JWT_SECRET||"";
 
@@ -22,12 +22,12 @@ export const users = [{
     },
      positions: [
         { market: "SOL", type: "LONG", qty: 10, margin: 500,pnL: 200, liquidationPrice: 80, averagePrice: 90 },
-        { market: "ETH", type: "SHORT", qty: 1, margin: 500,pnl:100, liquidationPrice: 2000, averagePrice: 1900 }
+        { market: "ETH", type: "SHORT", qty: 1, margin: 500,pnL:100, liquidationPrice: 2000, averagePrice: 1900 }
     ],
     orders: [
-        { orderId: 1, market: "SOL", type: "LONG", qty: 10, margin: 500, orderType: "limit", price: 90, status: "filled" },
-        { orderId: 2, market: "ETH", type: "SHORT", qty: 10, margin: 500, orderType: "limit", price: 1900, status: "filled" },
-        { orderId: 3, market: "BTC", type: "LONG", qty: 10, margin: 500, orderType: "limit", price: 1900, status: "cancelled" },
+        { orderId: "1", market: "SOL", type: "LONG", qty: 10, margin: 500, orderType: "limit", price: 90, status: "filled" },
+        { orderId: "2", market: "ETH", type: "SHORT", qty: 10, margin: 500, orderType: "limit", price: 1900, status: "filled" },
+        { orderId: "3", market: "BTC", type: "LONG", qty: 10, margin: 500, orderType: "limit", price: 1900, status: "cancelled" },
     ]
 }, {
     userId: "2",
@@ -42,15 +42,15 @@ export const users = [{
         { market: "ETH", type: "LONG", qty: 1, margin: 1000, liquidationPrice: 2000, pnL: -100, averagePrice: 1900 }
     ],
     orders: [
-        { orderId: 10, market: "SOL", type: "SHORT", qty: 10, margin: 500, orderType: "market", price: 90, status: "filled" },
-        { orderId: 11, market: "ETH", type: "LONG", qty: 10, margin: 500, orderType: "market", price: 1900, status: "filled" },
-        { orderId: 12, market: "ZEC", type: "LONG", qty: 10, margin: 500, orderType: "limit", price: 1900, status: "open" },
+        { orderId: "10", market: "SOL", type: "SHORT", qty: 10, margin: 500, orderType: "market", price: 90, status: "filled" },
+        { orderId: "11", market: "ETH", type: "LONG", qty: 10, margin: 500, orderType: "market", price: 1900, status: "filled" },
+        { orderId: "12", market: "ZEC", type: "LONG", qty: 10, margin: 500, orderType: "limit", price: 1900, status: "open" },
     ]
 }];
 
 type Bid = {
     availableQty: number,
-    openOrders: { userId: number, qty: number, filledQty: number, orderId: number, createdAt: Date }[]
+    openOrders: { userId: string, qty: number, filledQty: number, orderId: number, createdAt: Date }[]
 }
 
 type Orderbook = {
@@ -67,7 +67,7 @@ export const orderbooks: Orderbooks = {
      ETH: { bids: {}, asks: {}, lastTradedPrice: 1900, indexPrice: 1899.9 }
 }
 
-const fills = [{
+export const fills = [{
     maker: 1,
     taker: 2,
     market: "SOL",
@@ -225,22 +225,15 @@ app.post("/order", authMiddleware , (req:Request, res:Response)=>{
         found.collateral.locked +=requiredMargin;
         
 
-        const match = findMatchingOrders(userId ,data.symbol , data.side , data.quantity , data.price , data.leverage);
-        if(match){
+        const result= findMatchingOrders(userId ,data.symbol , data.side , data.quantity , data.price , data.leverage);
+        if(result && result.remainingQty>0){
+            
             //excuteTrade(data.symbol , data.side , data.quantity , data.price, match)
         }
        
 
 
-        found.positions.push({
-            market: data.symbol,
-            type: data.side,
-            qty: data.quantity,
-            margin: requiredMargin,
-            liquidationPrice:0,
-            pnL: 0,
-            averagePrice: data.price,
-        });
+        
 
 
         

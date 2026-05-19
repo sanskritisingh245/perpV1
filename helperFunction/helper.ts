@@ -1,126 +1,140 @@
 import { orderbooks, users } from ".."
-export function findMatchingOrders(userId:string ,symbol:string , side:string , quantity:number , price: number, leverage :number) {
-    let requiredAsset=orderbooks[symbol];
-    const buyerId=userId;
-    if(side === "long"){
-        let asks= requiredAsset?.asks;
-        if(!asks){return}
-        const bestAsks = Object.keys(asks).map(Number).sort((a,b)=>a-b);
-        let remaining= quantity;
-        for (let ask of  bestAsks){
-            if(ask>price){
-              break;
-            }
-            const level=asks[ask.toString()]; //availableQty , openorders
-            if(!level){
-                continue;
-            }
-            //looping through openorders 
-            for(const order of level.openOrders){
-                const sellerId=order.userId;
-                const fillable=order.qty - order.filledQty; // finding the qty still left to be filled 
-                if(fillable === 0) continue;
-                const take= Math.min(remaining, fillable); // whatever finding the min , so that we can subtract that from qty
-                order.filledQty +=take;
-                level.availableQty -= take; // reducing the quantity
-                remaining -=take; // fidning how much is still remainin
-                if(remaining === 0) break;     
-            }
-            const filledQty = quantity - remaining;   // how much actually got filled
-            const fillPrice = ask; 
-            let liquidationPrice = 0;
-            const user=users.find((user=> user.userId === buyerId))
-            const positions = user?.positions.find(p=> p.market === symbol && p.type === side.toUpperCase());
-            if(positions){
-                const newTotalQty= positions.qty +filledQty
-                positions.averagePrice *positions.qty + fillPrice *filledQty;
-                positions.qty=newTotalQty;
-                let liquidateAt =(positions.averagePrice * leverage)/100
-                positions.liquidationPrice  -= liquidateAt;
-                liquidationPrice=positions.liquidationPrice;
-            }else{
-                user?.positions.push({
-                    market:symbol,
-                    type:side.toUpperCase(),
-                    qty:filledQty,
-                    margin:0,
-                    averagePrice:fillPrice,
-                    liquidationPrice:liquidationPrice,
-                    pnL:0
-                })
- 
-            }
-            level.openOrders = level.openOrders.filter(o =>o.filledQty <o.qty)
-            if(level.openOrders.length ===0 ) {
-                delete asks[ask.toString()]
-            }
-            if(remaining === 0) break;
-                
-            //orderbook 
-            //postionupdate -> $100 ->1 , $110->1 , $120->2  450/4=112.5 => averageprice 
-            // liquidationprice => (112.5 *10)/100 = 11.25  liquidationprice= 112.5-11.25 (long) 112.5+11.25(short) 
-        }
-    }else{
-        let bids= requiredAsset?.bids;
-        if(!bids){return}
-        const bestBids = Object.keys(bids).map(Number).sort((a,b)=>a-b);
-        let remaining= quantity;
-        for (let bid of  bestBids){
-            if(bid>price){
-              break;
-            }
-            const level=bids[bid.toString()]; //availableQty , openorders
-            if(!level){
-                continue;
-            }
-            //looping through openorders 
-            for(const order of level.openOrders){
-                const sellerId=order.userId;
-                const fillable=order.qty - order.filledQty; // finding the qty still left to be filled 
-                if(fillable === 0) continue;
-                const take= Math.min(remaining, fillable); // whatever finding the min , so that we can subtract that from qty
-                order.filledQty +=take;
-                level.availableQty -= take; // reducing the quantity
-                remaining -=take; // fidning how much is still remainin
-                if(remaining === 0) break;     
-            }
-            const filledQty = quantity - remaining;   // how much actually got filled
-            const fillPrice = bid; 
-            let liquidationPrice = 0;
-            const user=users.find((user=> user.userId === buyerId))
-            const positions = user?.positions.find(p=> p.market === symbol && p.type === side.toUpperCase());
-            if(positions){
-                const newTotalQty= positions.qty +filledQty
-                positions.averagePrice=(positions.averagePrice *positions.qty + fillPrice *filledQty);
-                positions.qty=newTotalQty;
-                let liquidateAt =(positions.averagePrice * leverage)/100
-                positions.liquidationPrice  += liquidateAt;
-                liquidationPrice=positions.liquidationPrice;
-            }else{
-                user?.positions.push({
-                    market:symbol,
-                    type:side.toUpperCase(),
-                    qty:filledQty,
-                    margin:0,
-                    averagePrice:fillPrice,
-                    liquidationPrice:liquidationPrice,
-                    pnL:0
-                })
- 
-            }
-            level.openOrders = level.openOrders.filter(o =>o.filledQty <o.qty)
-            if(level.openOrders.length ===0 ) {
-                delete bids[bid.toString()]
-            }
-            if(remaining === 0) break;
-                
-            //orderbook 
-            //postionupdate -> $100 ->1 , $110->1 , $120->2  450/4=112.5 => averageprice 
-            // liquidationprice => (112.5 *10)/100 = 11.25  liquidationprice= 112.5-11.25 (long) 112.5+11.25(short) 
+
+type Level = {
+    availableQty: number;
+    openOrders: { userId: string; qty: number; filledQty: number; orderId: number; createdAt: Date }[];
+}//type bid of index
+
+type Fill = {
+    makerUserId: string;
+    makerOrderId: number;
+    qty: number;
+    price: number;
+};
+
+function matchSide(
+    levels: Record<string, Level>,
+    side: "long" | "short",
+    userId: string,
+    symbol: string,
+    quantity: number,
+    price: number,
+    leverage: number,
+    indexPrice: number,
+) {
+    const isLong = side === "long";
+
+    const sortedPrices = Object.keys(levels)
+        .map(Number)
+        .sort((a, b) => isLong ? a - b : b - a);   // sort according to the long ans short (long -> ascending short -> descending )
+
+    let remaining = quantity; // qty still needeed to be filled 
+    const fills: Fill[]=[];
+    let totalFilled=0; //qty moved 
+    let notional=0; //total value of the trade or the money moved
+    const user = users.find(u => u.userId === userId); //finding the taker
+    if (!user) {
+        return { fills: [], filledQty: 0, remainingQty: quantity, averageFillPrice: 0, status: "none" as const };
+    }//because in the function finding match order we are returning matchside 
+
+
+    for (const levelPrice of sortedPrices) { //iterate over the best price level
+        if (isLong ? levelPrice > price : levelPrice < price) break;   // limit of the take check 
+
+        const level = levels[levelPrice.toString()];
+        if (!level) continue;
+
+        const remainingBefore = remaining; //to check how much was filled at this level
+        for (const order of level.openOrders) { //actual filling 
+            const fillable = order.qty - order.filledQty;
+            if (fillable === 0) continue; // skip already filled 
+            if(order.userId === userId) continue; // user order skipped 
+            const take = Math.min(remaining, fillable);
+            order.filledQty += take;
+            level.availableQty = Math.max(0, level.availableQty - take);
+            remaining -= take;
+            fills.push({
+                makerUserId:order.userId,
+                makerOrderId:order.orderId,
+                qty:take,
+                price:levelPrice
+            });
+            totalFilled +=take;
+            notional += take*levelPrice;
+            if (remaining === 0) break; //taker order filled then break
         }
 
+        const filledQty = remainingBefore - remaining; //how much was filled 
+        if (filledQty === 0) continue;
+        const fillPrice = levelPrice;
+
+        const position = user?.positions.find(
+            p => p.market === symbol && p.type === side.toUpperCase()
+        );
+
+        if (position) {
+            const newTotalQty = position.qty + filledQty; //avergae calculated 
+            position.averagePrice =
+                (position.averagePrice * position.qty + fillPrice * filledQty) / newTotalQty;
+            position.qty = newTotalQty;
+
+            const liquidateAt = (position.averagePrice / leverage) ;
+            position.liquidationPrice = isLong                            
+                ? position.averagePrice - liquidateAt
+                : position.averagePrice + liquidateAt;
+            position.pnL = isLong        // unrealized pnl                                 
+                ? (indexPrice - position.averagePrice) * position.qty
+                : (position.averagePrice - indexPrice) * position.qty;
+        } else {
+            const liquidateAt = (fillPrice / leverage) ; // adding back the same fills
+            const liquidationPrice = isLong
+                ? fillPrice - liquidateAt
+                : fillPrice + liquidateAt;
+            const pnL = isLong
+                ? (indexPrice - fillPrice) * filledQty
+                : (fillPrice - indexPrice) * filledQty;
+
+            user?.positions.push({
+                market: symbol,
+                type: side.toUpperCase(),
+                qty: filledQty,
+                margin: 0,
+                averagePrice: fillPrice,
+                liquidationPrice,
+                pnL,
+            });
+        }
+         level.openOrders = level.openOrders.filter(o => o.filledQty < o.qty);
+        if (level.openOrders.length === 0) { //check if fully filld then remove them also remove them from order book
+            delete levels[levelPrice.toString()];
+        }
+
+        if (remaining === 0) break; //if taker fully filled then break out of the loop
     }
+    return {
+        fills,
+        filledQty:totalFilled,
+        remainingQty:quantity-totalFilled,
+        averageFillPrice:totalFilled ===0 ? 0 : notional/totalFilled,
+        status:totalFilled === 0 ? "none" : totalFilled < quantity? "partial" :"filled",
+    };        
+};
 
+
+export function findMatchingOrders(
+    userId: string,
+    symbol: string,
+    side: "long" | "short",
+    quantity: number,
+    price: number,
+    leverage: number,
+) {
+    const requiredAsset = orderbooks[symbol];
+    if(!requiredAsset) return ;
+    const indexPrice = requiredAsset.indexPrice;
+    if (indexPrice == null) return;
+    const levels = side === "long" ? requiredAsset.asks : requiredAsset.bids;   
+    return matchSide(levels, side, userId, symbol, quantity, price, leverage, indexPrice); //actual matching happening 
 }
 
 
@@ -129,4 +143,4 @@ export function findMatchingOrders(userId:string ,symbol:string , side:string , 
 // }
 
 
-// 
+//
