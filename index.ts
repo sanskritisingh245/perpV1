@@ -150,6 +150,7 @@ type Bid = {
     filledQty: number;
     orderId: string;
     createdAt: Date;
+    leverage: number;
   }[];
 };
 
@@ -340,6 +341,10 @@ app.post("/order", authMiddleware, (req: Request, res: Response) => {
     };
     Orders.push(newOrder); // how to add the completely filled order in this ???
 
+    const oppositeType = data.side === "long" ? "SHORT" : "LONG";
+    const oppositeQtyBefore =
+      found.positions.find(p => p.market === data.symbol && p.type === oppositeType)?.qty ?? 0;
+
     const result = matchAndExecute(
       userId,
       data.symbol,
@@ -348,6 +353,18 @@ app.post("/order", authMiddleware, (req: Request, res: Response) => {
       data.price,
       data.leverage,
     );
+
+    // Refund margin for any qty that netted against an opposite position
+    // rather than opening new exposure — that margin was double-locked.
+    const oppositeQtyAfter =
+      found.positions.find(p => p.market === data.symbol && p.type === oppositeType)?.qty ?? 0;
+    const nettedQty = oppositeQtyBefore - oppositeQtyAfter;
+    if (nettedQty > 0) {
+      const refund = (data.price * nettedQty) / data.leverage;
+      found.collateral.locked -= refund;
+      found.collateral.available += refund;
+    }
+
     if (result && result.remainingQty > 0) {
         newOrder.filledQty=result.filledQty;
         newOrder.remainingQty=result.remainingQty;
@@ -359,6 +376,7 @@ app.post("/order", authMiddleware, (req: Request, res: Response) => {
         data.price,
         result.remainingQty,
         orderId,
+        data.leverage,
       );
 
       checkLiquidations()
@@ -374,6 +392,16 @@ app.post("/order", authMiddleware, (req: Request, res: Response) => {
     });
   }
 });
+app.delete("/order",authMiddleware, (req :Request, res:Response) => {
+
+})
+app.get("/equity/available",authMiddleware, (req, res) => {})
+app.get("/positions/open/:marketId", (req, res) => {});
+app.get("/positions/closed/:marketId", (req, res) => {});
+app.get("/orders/open/:marketId", (req, res) => {})
+app.get("/orders/:marketId", (req, res) => {})
+app.get("/fills", (req, res) => {});
+
 
 app.listen(3000, () => {
   console.log(`running on port 3000`);

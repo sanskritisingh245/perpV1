@@ -2,7 +2,7 @@ import { orderbooks, users } from ".."
 
 type Level = {
     availableQty: number;
-    openOrders: { userId: string; qty: number; filledQty: number; orderId: string; createdAt: Date }[];
+    openOrders: { userId: string; qty: number; filledQty: number; orderId: string; createdAt: Date; leverage: number }[];
 }//type bid of index
 
 type Fill = {
@@ -11,6 +11,95 @@ type Fill = {
     qty: number;
     price: number;
 };
+
+function applyPositionUpdate(
+    userId: string,
+    symbol: string,
+    side: "long" | "short",
+    filledQty: number,
+    fillPrice: number,
+    leverage: number,
+): number {
+    const isLong = side === "long";
+    const positionType = isLong ? "LONG" as const : "SHORT" as const;
+    const user = users.find(u => u.userId === userId);
+    if (!user) return 0;
+
+    const position = user.positions.find(p => p.market === symbol);
+
+    if (!position) {
+        const liquidateAt = fillPrice / leverage;
+        const liquidationPrice = isLong ? fillPrice - liquidateAt : fillPrice + liquidateAt;
+        user.positions.push({
+            market: symbol,
+            type: positionType,
+            qty: filledQty,
+            margin: (fillPrice * filledQty) / leverage,
+            averagePrice: fillPrice,
+            liquidationPrice,
+        });
+        return 0;
+    }
+
+    if (position.type === positionType) {
+        const newTotalQty = position.qty + filledQty;
+        position.averagePrice =
+            (position.averagePrice * position.qty + fillPrice * filledQty) / newTotalQty;
+        position.qty = newTotalQty;
+        position.margin += (fillPrice * filledQty) / leverage;
+        const liquidateAt = position.averagePrice / leverage;
+        position.liquidationPrice = isLong
+            ? position.averagePrice - liquidateAt
+            : position.averagePrice + liquidateAt;
+        return 0;
+    }
+
+    if (filledQty < position.qty) {
+        const realizedPnl = position.type === "LONG"
+            ? (fillPrice - position.averagePrice) * filledQty
+            : (position.averagePrice - fillPrice) * filledQty;
+        const marginReleased = position.margin * (filledQty / position.qty);
+        user.collateral.locked -= marginReleased;
+        user.collateral.available += marginReleased + realizedPnl;
+        position.margin -= marginReleased;
+        position.qty -= filledQty;
+        return filledQty;
+    }
+
+    if (filledQty === position.qty) {
+        const realizedPnl = position.type === "LONG"
+            ? (fillPrice - position.averagePrice) * position.qty
+            : (position.averagePrice - fillPrice) * position.qty;
+        user.collateral.locked -= position.margin;
+        user.collateral.available += position.margin + realizedPnl;
+        user.positions = user.positions.filter(p => p !== position);
+        return filledQty;
+    }
+
+    // flip: filledQty > position.qty
+    const oldQty = position.qty;
+    const oldAvg = position.averagePrice;
+    const oldType = position.type;
+    const oldMargin = position.margin;
+    const realizedPnl = oldType === "LONG"
+        ? (fillPrice - oldAvg) * oldQty
+        : (oldAvg - fillPrice) * oldQty;
+    user.collateral.locked -= oldMargin;
+    user.collateral.available += oldMargin + realizedPnl;
+    user.positions = user.positions.filter(p => p !== position);
+    const newQty = filledQty - oldQty;
+    const liquidateAt = fillPrice / leverage;
+    const liquidationPrice = isLong ? fillPrice - liquidateAt : fillPrice + liquidateAt;
+    user.positions.push({
+        market: symbol,
+        type: positionType,
+        qty: newQty,
+        margin: (fillPrice * newQty) / leverage,
+        averagePrice: fillPrice,
+        liquidationPrice,
+    });
+    return oldQty;
+}
 
 function matchSide(
     levels: Record<string, Level>,
@@ -47,7 +136,7 @@ function matchSide(
         for (const order of level.openOrders) { //actual filling 
             const fillable = order.qty - order.filledQty;
             if (fillable === 0) continue; // skip already filled 
-            if(order.userId === userId) continue; // user order skipped 
+            if(order.userId === userId) continue; // user's own resting order skipped  Users cannot trade against themselves.
             const take = Math.min(remaining, fillable);
             order.filledQty += take;
             level.availableQty = Math.max(0, level.availableQty - take);
@@ -60,87 +149,30 @@ function matchSide(
             });
             totalFilled +=take;
             notional += take*levelPrice;
+
+            // Update the maker's position for this fill (opposite side from taker).
+            const makerSide = isLong ? "short" as const : "long" as const;
+            const makerNetted = applyPositionUpdate(
+                order.userId, symbol, makerSide, take, levelPrice, order.leverage
+            );
+            if (makerNetted > 0) {
+                const maker = users.find(u => u.userId === order.userId);
+                if (maker) {
+                    const refund = (levelPrice * makerNetted) / order.leverage;
+                    maker.collateral.locked -= refund;
+                    maker.collateral.available += refund;
+                }
+            }
+
             if (remaining === 0) break; //taker order filled then break
         }
 
-        const filledQty = remainingBefore - remaining; //how much was filled 
+        const filledQty = remainingBefore - remaining; //how much was filled
         if (filledQty === 0) continue;
         const fillPrice = levelPrice;
 
-        const position = user?.positions.find(
-            p => p.market === symbol 
-        );
+        applyPositionUpdate(userId, symbol, side, filledQty, fillPrice, leverage);
 
-        if(!position){ //no existing position
-            const liquidateAt = (fillPrice / leverage) ;
-            const liquidationPrice = isLong
-                ? fillPrice - liquidateAt
-                : fillPrice + liquidateAt;
-
-            user?.positions.push({
-                market: symbol,
-                type: side.toUpperCase(),
-                qty: filledQty,
-                margin: (fillPrice * filledQty) / leverage,
-                averagePrice: fillPrice,
-                liquidationPrice,
-            });
-        } else if (position.type === side.toUpperCase()) { //same side
-            const newTotalQty = position.qty + filledQty; //avergae calculated 
-            position.averagePrice =
-                (position.averagePrice * position.qty + fillPrice * filledQty) / newTotalQty;
-            position.qty = newTotalQty;
-
-            const liquidateAt = (position.averagePrice / leverage) ;
-            position.liquidationPrice = isLong
-                ? position.averagePrice - liquidateAt
-                : position.averagePrice + liquidateAt;
-        }else{
-            if(filledQty < position.qty){
-                const realizedPnl = position.type === "LONG"
-                    ?(fillPrice - position.averagePrice)*filledQty
-                    :(position.averagePrice - fillPrice)*filledQty;
-                const marginReleased=position.margin *(filledQty/position.qty); //give back collateral they locked  position's collateral to give to user proportional to how much of the position is being closed
-                user.collateral.locked-=marginReleased;
-                user.collateral.available+=marginReleased + realizedPnl;
-                position.margin -=marginReleased;
-                position.qty -=filledQty;
-            }else if(filledQty === position.qty){
-                const realizedPnl = position.type === "LONG"
-                    ?(fillPrice - position.averagePrice)*position.qty
-                    :(position.averagePrice - fillPrice)*position.qty;
-                user.collateral.locked -= position.margin;
-                user.collateral.available +=position.margin +realizedPnl;
-                user.positions = user.positions.filter(p => p !== position);
-            }else{
-                const oldQty=position.qty;
-                const oldAvg=position.averagePrice;
-                const oldType=position.type;
-                const oldMargin = position.margin;
-
-                const realizedPnl = oldType === "LONG"
-                    ?(fillPrice - oldAvg)*oldQty
-                    :(oldAvg - fillPrice)*oldQty
-                user.collateral.locked -=oldMargin;
-                user.collateral.available += oldMargin + realizedPnl;
-
-                user.positions= user.positions.filter(p => p !== position);
-                const newQty=filledQty-oldQty;
-                const liquidateAt = (fillPrice / leverage) ;
-                const liquidationPrice = isLong
-                    ? fillPrice - liquidateAt
-                    : fillPrice + liquidateAt;
-
-                user?.positions.push({
-                    market: symbol,
-                    type: side.toUpperCase(),
-                    qty: newQty,
-                    margin: (fillPrice * newQty) / leverage,
-                    averagePrice: fillPrice,
-                    liquidationPrice,
-                })
-            }
-        }
         level.openOrders = level.openOrders.filter(o => o.filledQty < o.qty);
         if (level.openOrders.length === 0) { //check if fully filld then remove them also remove them from order book
             delete levels[levelPrice.toString()];

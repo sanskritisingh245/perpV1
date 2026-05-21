@@ -1,6 +1,6 @@
 import { orderbooks } from "..";
 
-export function addToOrderBook(userId :string , symbol:string , side: string , price:number,  remainingQty: number, orderId:string){
+export function addToOrderBook(userId :string , symbol:string , side: string , price:number,  remainingQty: number, orderId:string, leverage: number){
     const requiredAsset=orderbooks[symbol];
     if(!requiredAsset) return;
     const levels= side === "long" ? requiredAsset?.bids : requiredAsset?.asks;
@@ -14,6 +14,7 @@ export function addToOrderBook(userId :string , symbol:string , side: string , p
             filledQty:0,
             orderId:orderId,
             createdAt:new Date(),
+            leverage,
         })
     } else {
         levels[key] ={
@@ -24,6 +25,7 @@ export function addToOrderBook(userId :string , symbol:string , side: string , p
                 filledQty:0,
                 orderId:orderId,
                 createdAt: new Date(),
+                leverage,
             }],
         };
     }
