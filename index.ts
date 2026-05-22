@@ -5,7 +5,11 @@ import { authMiddleware } from "./middleware";
 import { OrderSchema } from "./zod/order";
 import { matchAndExecute } from "./helperFunction/helper";
 import { addToOrderBook } from "./helperFunction/Orderbook";
-import { checkLiquidations } from "./helperFunction/liquidation";
+import { checkLiquidations, unrealizedPnl } from "./helperFunction/liquidation";
+import { success } from "zod";
+import { unrealizedPnL } from "./helperFunction/pnl";
+import { fa } from "zod/locales";
+import bcrypt from "bcryptjs";
 
 const JWT_SECRET = process.env.JWT_SECRET || "";
 
@@ -217,7 +221,7 @@ export const fills = [
   },
 ];
 
-app.post("/signup", (req: Request, res: Response) => {
+app.post("/signup", async(req: Request, res: Response) => {
   try {
     const { success, data } = SignupSchema.safeParse(req.body);
     if (!success) {
@@ -227,10 +231,19 @@ app.post("/signup", (req: Request, res: Response) => {
       });
     }
     const userId = crypto.randomUUID();
+
+    const password= await bcrypt.hash(data.password, 10)
+    const user= users.find(user => user.username === data.username)
+    if(user){
+      return res.status(400).json({
+        success:false,
+        error:"USERNAME_ALREADY_EXSIST"
+      })
+    }
     users.push({
       userId: userId,
       username: data.username,
-      password: data.password,
+      password: password,
       collateral: {
         available: 0,
         locked: 0,
@@ -251,9 +264,10 @@ app.post("/signup", (req: Request, res: Response) => {
   }
 });
 
-app.post("/signin", (req: Request, res: Response) => {
+app.post("/signin", async (req: Request, res: Response) => {
   try {
     const userId = req.body.userId;
+    
     if (!userId) {
       return res.status(400).json({
         success: false,
@@ -268,6 +282,7 @@ app.post("/signin", (req: Request, res: Response) => {
         error: "USER_NOT_FOUND",
       });
     }
+
     const token = jwt.sign(
       {
         id: found.userId,
@@ -292,7 +307,7 @@ app.post("/signin", (req: Request, res: Response) => {
 app.post("/onramp", authMiddleware, (req: Request, res: Response) => {
   try {
     const userId = req.id;
-    const balance = req.body.Balance;
+    const balance = req.body.balance;
     if (!balance) {
       return res.status(400).json({
         success: false,
@@ -367,11 +382,21 @@ app.post("/order", authMiddleware, (req: Request, res: Response) => {
       remainingQty: data.quantity,
       status: "OPEN",
     };
-    Orders.push(newOrder); // how to add the completely filled order in this ???
+    found.orders.push({
+      orderId: newOrder.orderId,
+      market: newOrder.market,
+      type: newOrder.side.toUpperCase(),
+      qty: newOrder.qty,
+      margin: requiredMargin,
+      orderType: data.type,   // "limit" | "market" from the schema
+      price: data.price,
+      status: newOrder.status,
+    }); // how to add the completely filled order in this ???
 
     const oppositeType = data.side === "long" ? "SHORT" : "LONG";
     const oppositeQtyBefore =
       found.positions.find(p => p.market === data.symbol && p.type === oppositeType)?.qty ?? 0;
+
 
     const result = matchAndExecute(
       userId,
@@ -436,6 +461,23 @@ app.post("/order", authMiddleware, (req: Request, res: Response) => {
 
 app.delete("/order",authMiddleware, (req :Request, res:Response) => {
   try{
+    const userId=req.id;
+    const orderId=req.query.orderId as string;
+    if(!orderId){
+      return res.status(404).json({
+        success:false,
+        error:"ORDER_ID_NOT_FOUND"
+      })
+    }
+
+    const user=users.find(u=> u.userId === userId);
+      if(!user){
+        return res.status(400).json({
+          success:false,
+          error:"USER_NOT_FOUND"
+        })
+      }
+
 
   }catch (e: any) {
     return res.status(500).json({
@@ -447,9 +489,35 @@ app.delete("/order",authMiddleware, (req :Request, res:Response) => {
 
 app.get("/equity/available",authMiddleware, (req, res) => {
   try{
+      const userId=req.id;
+      const user=users.find(u=> u.userId === userId);
+      if(!user){
+        return res.status(400).json({
+          success:false,
+          error:"USER_NOT_FOUND"
+        })
+      }
 
-
-  }catch (e: any) {
+      const symbol=req.query.symbol as string;
+      if(!symbol){
+        return res.status(400).json({
+          success:false,
+          error:"SYMBOL_NOT_FOUND"
+        })
+      }
+      
+      let equity = user.collateral.available+user.collateral.locked;
+      for(const position of user.positions){
+        const book =orderbooks[symbol];
+        if(!book) return;
+        const markPrice=book.indexPrice;
+        equity +=unrealizedPnl(position, markPrice);//equity= collateral + unrelaizedPnl
+      }
+      res.status(200).json({
+        success:true,
+        data:equity
+      })
+    }catch (e: any) {
     return res.status(500).json({
       success: false,
       msg: e.message || "Internal Server Error",
@@ -460,7 +528,53 @@ app.get("/equity/available",authMiddleware, (req, res) => {
 
 app.get("/positions/open/:marketId",authMiddleware, (req, res) => {
   try{
+    const userId=req.id;
+    const marketId=req.params.marketId;
 
+    const user= users.find(user => user.userId === userId);
+    if(!user){
+      return res.status(400).json({
+        success:false,
+        error:"USER_NOT_FOUND"
+      })
+    }
+
+    for(const position of user.positions){
+      if(position.market !== marketId) {
+        return res.status(400).json({
+          success:false,
+          error:"NO_OPEN_POSITION"
+        })
+      }
+
+      const book=orderbooks[marketId];
+      if(!book){
+        return res.status(400).json({
+          success:false,
+          error:"MARKET_NOT_FOUND"
+        })
+      }
+      const markPrice=book.indexPrice;
+      const pnl=unrealizedPnl(position, markPrice)
+      const positionValue=markPrice*position.qty;
+      const equity=position.margin+pnl;
+
+      return res.status(200).json({
+        success:true,
+        data:{
+          market:position.market,
+          side:position.type,
+          qty:position.qty,
+          markPrice:markPrice,
+          unrealizedPnl:pnl,
+          margin:position.margin,
+          liquidationPrice:position.liquidationPrice,
+          positionValue: positionValue,
+          equity:equity
+        }
+      })
+
+    }
   }catch (e: any) {
     return res.status(500).json({
       success: false,
@@ -484,6 +598,40 @@ app.get("/positions/closed/:marketId",authMiddleware, (req, res) => {
 
 app.get("/orders/open/:marketId", authMiddleware,(req, res) => {
   try{
+    const userId=req.id;
+    const marketId=req.params.marketId as string;
+    if(!marketId){
+      return res.status(400).json({
+        success:false,
+        error:"MARKET_ID_REQUIRED"
+      })
+    }
+
+    const user= users.find(user => user.userId === userId);
+    if(!user){
+      return res.status(400).json({
+        success:false,
+        error:"USER_NOT_FOUND"
+      })
+    }
+
+    if(!orderbooks[marketId]){
+      return res.status(404).json({
+        success:false,
+        error:"MARKET_NOT_FOUND"
+      })
+    }
+
+    const openOrders = user.orders.filter(
+      order => order.market === marketId && order.status === "open"
+    );
+
+    return res.status(200).json({
+      success:true,
+      data: openOrders
+    })
+
+
 
   }catch (e: any) {
     return res.status(500).json({
@@ -496,6 +644,39 @@ app.get("/orders/open/:marketId", authMiddleware,(req, res) => {
 
 app.get("/orders/:marketId",authMiddleware, (req, res) => {
   try{
+    const userId=req.id;
+
+    const marketId=req.params.marketId as string;
+    if(!marketId){
+      return res.status(400).json({
+        success:false,
+        error:"MARKET_ID_REQUIRED"
+      })
+    }
+
+    const user= users.find(user=> user.userId === userId)
+    if(!user){
+      return res.status(400).json({
+        success:false,
+        error:"USER_NOT_FOUND"
+      })
+    }
+
+    if(!orderbooks[marketId]){
+      return res.status(404).json({
+        success:false,
+        error:"MARKET_NOT_FOUND"
+      })
+    }
+
+    const orders = user.orders.filter(
+      order => order.market === marketId 
+    );
+
+    return res.status(200).json({
+      success:true,
+      data:orders
+    })
 
   }catch (e: any) {
     return res.status(500).json({
@@ -508,7 +689,10 @@ app.get("/orders/:marketId",authMiddleware, (req, res) => {
 
 app.get("/fills", (req, res) => {
   try{
-
+    return res.status(200).json({
+      success:true,
+      data:fills
+    })
   }catch (e: any) {
     return res.status(500).json({
       success: false,
