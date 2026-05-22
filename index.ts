@@ -132,7 +132,34 @@ export const users = [
     ],
   },
 ];
-type Order = {
+
+export type User = {
+  userId:string;
+  username:string;
+  password:string;
+  collateral:{available:number ; locked:number};
+  positions:Position[];
+  orders:{
+    orderId:string;
+    market:string;
+    type:string;
+    qty:number;
+    margin:number;
+    orderType:string;
+    price:number;
+    status:string;
+  }[];
+};
+
+export type Position = {
+  market:string,
+  type:string,
+  qty:number,
+  margin:number,
+  averagePrice:number,
+  liquidationPrice:number;
+}
+export type Order = {
   orderId: string;
   market: string;
   side: string;
@@ -159,13 +186,14 @@ type Orderbook = {
   asks: Record<string, Bid>;
   lastTradedPrice: number;
   indexPrice: number;
+  mmr:number;
 };
 
 type Orderbooks = Record<string, Orderbook>;
 
 export const orderbooks: Orderbooks = {
-  SOL: { bids: {}, asks: {}, lastTradedPrice: 90, indexPrice: 90.01 },
-  ETH: { bids: {}, asks: {}, lastTradedPrice: 1900, indexPrice: 1899.9 },
+  SOL: { bids: {}, asks: {}, lastTradedPrice: 90, indexPrice: 90.01, mmr:0.005 },
+  ETH: { bids: {}, asks: {}, lastTradedPrice: 1900, indexPrice: 1899.9, mmr:0.005 },
 };
 
 export const fills = [
@@ -379,11 +407,23 @@ app.post("/order", authMiddleware, (req: Request, res: Response) => {
         data.leverage,
       );
 
-      checkLiquidations()
+      checkLiquidations(data.symbol)
 
-      
-      //liquidation implementaion
-      
+      res.status(200).json({
+        success:true,
+        order:{
+          orderId,
+          market:data.symbol,
+          side:data.side,
+          qty:data.quantity,
+          filledQty:result.filledQty,
+          remainingQty:result.averageFillPrice,
+          status:newOrder.status
+        },
+        fills:result.fills,
+        collateral:found.collateral,
+        positions:found.positions,
+      });
     }
   } catch (e: any) {
     return res.status(500).json({
@@ -392,15 +432,90 @@ app.post("/order", authMiddleware, (req: Request, res: Response) => {
     });
   }
 });
-app.delete("/order",authMiddleware, (req :Request, res:Response) => {
 
-})
-app.get("/equity/available",authMiddleware, (req, res) => {})
-app.get("/positions/open/:marketId", (req, res) => {});
-app.get("/positions/closed/:marketId", (req, res) => {});
-app.get("/orders/open/:marketId", (req, res) => {})
-app.get("/orders/:marketId", (req, res) => {})
-app.get("/fills", (req, res) => {});
+
+app.delete("/order",authMiddleware, (req :Request, res:Response) => {
+  try{
+
+  }catch (e: any) {
+    return res.status(500).json({
+      success: false,
+      msg: e.message || "Internal Server Error",
+    });
+  }
+});
+
+app.get("/equity/available",authMiddleware, (req, res) => {
+  try{
+
+
+  }catch (e: any) {
+    return res.status(500).json({
+      success: false,
+      msg: e.message || "Internal Server Error",
+    });
+  }
+});
+
+
+app.get("/positions/open/:marketId",authMiddleware, (req, res) => {
+  try{
+
+  }catch (e: any) {
+    return res.status(500).json({
+      success: false,
+      msg: e.message || "Internal Server Error",
+    });
+  }
+});
+
+
+app.get("/positions/closed/:marketId",authMiddleware, (req, res) => {
+  try{
+
+  }catch (e: any) {
+    return res.status(500).json({
+      success: false,
+      msg: e.message || "Internal Server Error",
+    });
+  }
+});
+
+
+app.get("/orders/open/:marketId", authMiddleware,(req, res) => {
+  try{
+
+  }catch (e: any) {
+    return res.status(500).json({
+      success: false,
+      msg: e.message || "Internal Server Error",
+    });
+  }
+});
+
+
+app.get("/orders/:marketId",authMiddleware, (req, res) => {
+  try{
+
+  }catch (e: any) {
+    return res.status(500).json({
+      success: false,
+      msg: e.message || "Internal Server Error",
+    });
+  }
+});
+
+
+app.get("/fills", (req, res) => {
+  try{
+
+  }catch (e: any) {
+    return res.status(500).json({
+      success: false,
+      msg: e.message || "Internal Server Error",
+    });
+  }
+});
 
 
 app.listen(3000, () => {
