@@ -459,17 +459,11 @@ app.post("/order", authMiddleware, (req: Request, res: Response) => {
 });
 
 
-app.delete("/order",authMiddleware, (req :Request, res:Response) => {
+app.delete("/order/:orderId",authMiddleware, (req :Request, res:Response) => {
   try{
     const userId=req.id;
-    const orderId=req.query.orderId as string;
-    if(!orderId){
-      return res.status(404).json({
-        success:false,
-        error:"ORDER_ID_NOT_FOUND"
-      })
-    }
-
+    const orderId = req.params.orderId as string;
+    
     const user=users.find(u=> u.userId === userId);
       if(!user){
         return res.status(400).json({
@@ -478,7 +472,61 @@ app.delete("/order",authMiddleware, (req :Request, res:Response) => {
         })
       }
 
+    const order = user.orders.find(o => o.orderId === orderId);
+      if(!order){
+        return res.status(404).json({
+          success:false,
+          error:"ORDER_NOT_FOUND" 
+        });
+      }
 
+    if(order.status.toLowerCase() !=="open"){
+        return res.status(400).json({
+          success:false,
+          error:"ORDER_NOT_CANCELLABLE"
+        });
+      }
+    
+    const book = orderbooks[order.market];
+    if(!book){
+      return res.status(404).json({
+        success:false,
+        error:"MARKET_NOT_FOUND"
+      })
+    }
+
+    const levels= order.type.toUpperCase() === "LONG" ?book.bids : book.asks;
+    const key = order.price.toString();
+    const level = levels[key];
+
+    let remainingQty =order.qty;
+
+    //removing the order
+    if(level){
+      const idx = level.openOrders.findIndex(o => o.orderId ===orderId);//finds the specific orderId
+      if(idx !== -1){
+        const entry = level.openOrders[idx]!;
+        remainingQty = entry.qty - entry.filledQty;//unfilled portion (how much needs to be filled)
+        level.availableQty -= remainingQty;//decreases the qty 
+        level.openOrders.splice(idx, 1);//removes the order entry from the list
+        if(level.openOrders.length === 0 ) delete levels[key];//cleans up the empty bucket from the book
+      }
+    }
+    
+    const refund=(order.margin * remainingQty)/order.qty;
+    user.collateral.locked -= refund;
+    user.collateral.available +=refund;
+
+    order.status = "cancelled";
+
+    return res.status(200).json({
+      success:true,
+      data:{
+        orderId,
+        refundedMargin:refund,
+        collateral:user.collateral,
+      },
+    });
   }catch (e: any) {
     return res.status(500).json({
       success: false,
